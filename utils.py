@@ -81,6 +81,11 @@ class PreProcess:
         print('Transposing...')
         selected = selected.astype('float32')
         selected = selected.T
+
+        print('Clearing absolute constant values...')
+        selected['unique'] = selected.apply(lambda row: np.unique(row).shape[0] > 1, axis = 1)
+        selected = selected[selected.unique == 1]
+        selected.drop('unique', axis = 1, inplace = True)
         print('Finished!')
         print('*'*30)
 
@@ -199,8 +204,8 @@ class StatisticCounter:
             df_plot = self.df[['R', 'corr_resid']]
             plt.figure(figsize=(12,8))
             sns.pairplot(df_plot)
-            plt.title('Pairwise distribution of correlations')
             plt.show()
+
         return self.df
     
 class SeqParser:
@@ -238,10 +243,11 @@ class SeqParser:
         self.df[['Chr', 'Pos']] = self.df.apply(lambda row: self.parse_chr(row), axis = 1)
         self.df['flag'] = self.df.Pos.str.match(r'[A-z]')
         self.df = self.df[self.df.flag == 0]
-        self.df.drop(['Len', 'index'], axis = 1, inplace = True)
+        self.df.drop(['flag', 'index'], axis = 1, inplace = True)
         self.df['Pos'] = np.uint32(self.df.Pos.values)
-        self.df[['Start', 'End']] = self.df.Pos - window, self.df.Pos + window
-        df = self.df[['Chr', 'Pos', 'Start', 'End', 'R', 'corr_resid']]
+        self.df['Start'] = self.df.Pos - window
+        self.df['End'] = self.df.Pos + window
+        df = self.df[['Chr', 'Pos', 'Start', 'End', 'R', 'corr_resid', 'R_sign']]
         return df
 
     def cut_seq(self, df):
@@ -257,19 +263,26 @@ class SeqParser:
     
     def count_feature(self, df, features:list):
         for feat in features:
-            df[feat] = self.df.apply(lambda row: row.Seq.count(feat), axis = 1)
+            df[feat] = df.apply(lambda row: row.Seq.count(feat), axis = 1)
         return df
     
     def __call__(self, features:list = ['CG', 'TG'], window:int = 10000):
+        print('*'*30)
+        print('Defining cuts\' bounds...')
         df = self.chr_maker(window=window)
         start_array = df['Start'].values
         end_array = df['End'].values
         vals = df.Pos.values  
+        print('Counting CpGs inside cut...')
         counts = self.count_cpg_vectorized(start_array=start_array, end_array=end_array, vals=vals)
         df['count_cpg'] = counts
+        print('Obtainig cuts\' sequence...')
         df = self.cut_seq(df)
+        print(f'Counting features: {features}...')
         df = self.count_feature(df=df, features=features)
-        df = df.drop(['Seq'], axis = 1, inplace = True)
+        df.drop(['Seq'], axis = 1, inplace = True)
+        print('Finished!')
+        print('*'*30)
         return df
 
 class Projector:
@@ -442,7 +455,7 @@ class MLHandler:
             NB! X should contain 'Chr' column, and this should be the only text column
 
             ****
-            Args: model - sklearn model, (X,y) - data, score - metric,
+            Args: (X,y) - data, score - metric,
                   test_size - number of chromosomes for test, seed - reproducable train-test,
                   random_state - reproducable cross val split
 
@@ -451,9 +464,6 @@ class MLHandler:
         """
 
         self.random_state = random_state
-
-        if X is not None:
-            self.chrs = X.Chr.unique()
 
         if (X is not None) & (y is not None):
             self.X_train, self.X_test, self.y_train, self.y_test = self.train_test(X=X, y=y, test_size=test_size, seed=seed)
@@ -483,6 +493,10 @@ class MLHandler:
             Note: haven't tested for more than six models. Maybe, the barplot will be fucked up
         """
         scores = {}
+        if 'Chr' in self.X_train.columns:
+            self.X_train.drop('Chr', axis = 1, inplace = True)
+        if 'Chr' in self.X_test.columns:
+            self.X_test.drop('Chr', axis = 1, inplace = True)
         for model in models:
             print('*'*30)
             print(f'Trying model {model}...')
@@ -536,9 +550,6 @@ class MLHandler:
         X_train = X.loc[~X.Chr.isin(test)].copy()
         X_test = X.loc[X.Chr.isin(test)].copy()
 
-        X_test.drop(['Chr'], axis = 1, inplace = True)
-        X_train.drop(['Chr'], axis = 1, inplace = True)
-
         y_train = y.loc[y.index.isin(X_train.index)].copy()
         y_test = y.loc[y.index.isin(X_test.index)].copy()
 
@@ -554,6 +565,9 @@ class MLHandler:
             ******
             Output: sklearn permutation importance object
         """
+        if 'Chr' in self.X_test.columns:
+            self.X_test.drop('Chr', axis = 1, inplace = True)
+
         r = permutation_importance(model, self.X_test, self.y_test,
                            n_repeats=30,
                            random_state=0)
@@ -599,7 +613,12 @@ class MLHandler:
         vals = X[value].unique()
         count = Counter(vals)
         weights = count.values()
-        sampled = np.random.choice(vals, p=weights, replace=False, size=number)
+        prob = []
+        for val in weights:
+            val = np.round(val/X.shape[0],15)
+            prob.append(val)
+        prob[-1] = prob[-1] + 1 - sum(prob)
+        sampled = np.random.choice(list(vals), p=prob, replace=False, size=number)
         sample = X.loc[X[value].isin(sampled)].copy()
         if y is not None:
             sample_y = y.loc[y.index.isin(sample.index)].copy()
@@ -615,7 +634,8 @@ class MLHandler:
         """
         result_x = []
         result_y = []
-        for chr in self.chrs:
+        chrs = X.Chr.unique()
+        for chr in chrs:
             X = X.loc[X.Chr.isin(chr)].copy()
             y = y.loc[y.index.isin(X.index)].copy()
 
@@ -634,17 +654,12 @@ class MLHandler:
             return data_strapped_x, data_strapped_y
         else:
             return data_strapped_x
-
-    def shuffle(self):
-        """
-            Util function for reproducable cross val split
-
-            Better not to touch
-        """
-        if self.random_state is not None:
-            return self.random_state
-        else:
-            return np.random.uniform(low=0, high=1, size=1)
+    
+    @staticmethod
+    def return_shuffled(data:list):
+        random_keys = [random.random() for _ in data]
+        data_shuffled = [x for _, x in sorted(zip(random_keys, data))]
+        return data_shuffled
     
     def cross_val(self, model, cv:int = 5, one_by_one:bool = False):
         """
@@ -658,10 +673,12 @@ class MLHandler:
             ******
             Output: cross-val score, plots
         """
-        vals = random.shuffle(self.chrs, self.shuffle())
+        chrs = self.X_train.Chr.unique()
+        vals = self.return_shuffled(list(chrs))
         if one_by_one:
-            cv = 1
-        cross = [vals[i:i + len(vals)//cv] for i in range(0, len(vals), len(vals)//cv)]
+            cross = [[val] for val in vals]
+        else:
+            cross = [vals[i:i + len(vals)//cv] for i in range(0, len(vals), len(vals)//cv)]
         score = [] if not one_by_one else {}
         print('*'*30)
         print('Performing cross validation...')
@@ -673,6 +690,9 @@ class MLHandler:
             y_train = self.y_train.loc[self.y_train.index.isin(X_train.index)].copy()
             y_test = self.y_train.loc[self.y_train.index.isin(X_test.index)].copy()
 
+            X_train.drop('Chr', inplace = True, axis = 1)
+            X_test.drop('Chr', inplace = True, axis = 1)
+
             model.fit(X_train, y_train)
 
             prediction = model.predict(X_test)
@@ -682,7 +702,7 @@ class MLHandler:
             if not one_by_one:
                 score.append(metric)
             else:
-                score[set] = metric
+                score[set[0]] = metric
         print('Done!')
         print('*'*30)
         if not one_by_one:
@@ -690,7 +710,8 @@ class MLHandler:
             plt.title('Cross val score')
             plt.ylabel(f'{self.score}')
         else:
-            score = pd.DataFrame(score)
+            score = pd.DataFrame(score, index=range(len(chrs)))
+            plt.figure(figsize=(14,10))
             sns.barplot(score)
             plt.title(f'Chromosomes {self.score}')
             plt.ylabel(f'{self.score}')
@@ -711,7 +732,8 @@ class MLHandler:
             ******
             Output: best params by score mean value and by standard deviation of score
         """
-        vals = random.shuffle(self.chrs, self.shuffle())
+        chrs = self.X_train.Chr.unique()
+        vals = self.return_shuffled(list(chrs))
         cross = [vals[i:i + len(vals)//cv] for i in range(0, len(vals), len(vals)//cv)]
         grid = ParameterGrid(params)
         param_grid = [prod for prod in grid]
@@ -728,11 +750,14 @@ class MLHandler:
                 y_train = self.y_train.loc[self.y_train.index.isin(X_train.index)].copy()
                 y_test = self.y_train.loc[self.y_train.index.isin(X_test.index)].copy()
 
-                model = model(**param)
+                X_train.drop('Chr', inplace = True, axis = 1)
+                X_test.drop('Chr', inplace = True, axis = 1)
 
-                model.fit(X_train, y_train)
+                model_par = model(**param)
 
-                prediction = model.predict(X_test)
+                model_par.fit(X_train, y_train)
+
+                prediction = model_par.predict(X_test)
 
                 metric = self.score(y_test, prediction)
 
@@ -758,7 +783,7 @@ class MLHandler:
 
         return best_params_mean, best_params_stds
 
-def default_pipe(dataset, path, impute:bool = False, typ = pearsonr,
+def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
                  plot_distribution:bool = True, show_summary:bool = True,
                  features:list = ['CG', 'TG'], window:int = 10000,
                  imp_method:str = 'mean'):
@@ -800,11 +825,23 @@ def parse_chr(row):
     return pd.Series({'Chr': chr, 'Pos': pos})
 
 def raw_prep_bootstrap(dataset):
+    """
+        Prepare raw dataset (without embeddings) for bootstrapping.
+
+        ****
+        Args: dataset - pd.dataframe after preproccessing (Preproccess or StatisticCounter)
+
+        ******
+        Output: prepared data
+
+        After this, data can be used with MLHandler's bootstrapping methods. Reccomend 
+        using bootstrap_master()
+    """
     dataset.reset_index(inplace = True)
     dataset[['Chr', 'Pos']] = dataset.apply(lambda row: parse_chr(row), axis = 1)
     dataset['flag'] = dataset.Pos.str.match(r'[A-z]')
     dataset = dataset[dataset.flag == 0]
-    dataset.drop(['Len', 'index'], axis = 1, inplace = True)
+    dataset.drop(['flag', 'index'], axis = 1, inplace = True)
     dataset.drop(['Pos'], inplace = True, axis = 1)
     return dataset
 
