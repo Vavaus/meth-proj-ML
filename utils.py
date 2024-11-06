@@ -30,7 +30,8 @@ class PreProcess:
             Clean from NaN or impute -> 
             Select most variable by age tissue ->
             Convert to float32 ->
-            Convert age to column and sites as index.
+            Convert age to column and sites as index ->
+            Clear data from constant sites to avoid NaNs for correlation.
 
             ****
             Args: dataframe - pandas df with row beta-values
@@ -445,7 +446,7 @@ class Cluster(Projector):
 
 class MLHandler:
     def __init__(self, X=None, y=None, score = r2_score, test_size:int = 3, 
-                 seed:int = 42, random_state = None):
+                 seed:int = 42):
         """
             Class with ML utils. Doesn't have a unified __call__() method,
             as it is a collection of functions for ML task.
@@ -456,14 +457,12 @@ class MLHandler:
 
             ****
             Args: (X,y) - data, score - metric,
-                  test_size - number of chromosomes for test, seed - reproducable train-test,
-                  random_state - reproducable cross val split
+                  test_size - number of chromosomes for test, 
+                  seed - reproducable train-test
 
             *******
             Example: Depends on a method that you use. Look documentation for methods.
         """
-
-        self.random_state = random_state
 
         if (X is not None) & (y is not None):
             self.X_train, self.X_test, self.y_train, self.y_test = self.train_test(X=X, y=y, test_size=test_size, seed=seed)
@@ -718,19 +717,24 @@ class MLHandler:
         
         return score
     
-    def grid_search_cv(self, model, params:dict, cv:int = 5):
+    def grid_search_cv(self, model, params:dict, cv:int = 5, n_jobs = None):
         """
             Perform grid search over parameters.
 
             This method can be modified to work better. In progress...
 
+            Haven't done multiprocess iteration yet. In progress...
+
             ****
             Args: params - parameters dictionary in a default form:
                   {'n_estimators':[100,200], 'max_depth':[1,2,3,...], ...},
-                  cv - number of folds
+                  cv - number of folds, n_jobs - only for models that support it
             
             ******
             Output: best params by score mean value and by standard deviation of score
+
+            Note! Model should be passed without brackets. So, if it's Ridge, 
+            than model = Ridge, not Ridge()!!!
         """
         chrs = self.X_train.Chr.unique()
         vals = self.return_shuffled(list(chrs))
@@ -753,7 +757,10 @@ class MLHandler:
                 X_train.drop('Chr', inplace = True, axis = 1)
                 X_test.drop('Chr', inplace = True, axis = 1)
 
-                model_par = model(**param)
+                if n_jobs is not None:
+                    model_par = model(**param, n_jobs = n_jobs)
+                else:
+                    model_par = model(**param)
 
                 model_par.fit(X_train, y_train)
 
@@ -782,6 +789,80 @@ class MLHandler:
         print('Done selection.')
 
         return best_params_mean, best_params_stds
+    
+    def randomized_search_cv(self, model, param_dist:dict, n_iters:int = 50, cv:int = 5, n_jobs = None):
+        """
+            Perform randomized search cv over sampled from a distribution parameters
+
+            Haven't done multiprocess iteration yet. In progress...
+
+            ****
+            Args: model, param_dist - dict where keys are param names and values are
+            scipy.stats distributions, n_iters - number of iterations, cv,
+            n_jobs - only for models that support it.
+
+            ******
+            Output: best params by score mean value and by standard deviation of score
+
+            Note! Model should be passed without brackets. So, if it's Ridge, 
+            than model = Ridge, not Ridge()!!!
+        """
+        chrs = self.X_train.Chr.unique()
+        vals = self.return_shuffled(list(chrs))
+        cross = [vals[i:i + len(vals)//cv] for i in range(0, len(vals), len(vals)//cv)]
+        score_param = []
+        param_grid = []
+        print('*'*30)
+        print(f'Performing grid search with cv = {cv}, will be {n_iters} iterations total...')
+        for i in tqdm(range(n_iters)):
+            pd = param_dist.copy()
+            for key in pd.keys():
+                pd[key] = pd[key].rvs(1)[0]
+            score_fit = []
+            for set in cross:
+                X_train = self.X_train.loc[~self.X_train.Chr.isin(set)].copy()
+                X_test = self.X_train.loc[self.X_train.Chr.isin(set)].copy()
+
+                y_train = self.y_train.loc[self.y_train.index.isin(X_train.index)].copy()
+                y_test = self.y_train.loc[self.y_train.index.isin(X_test.index)].copy()
+
+                X_train.drop('Chr', inplace = True, axis = 1)
+                X_test.drop('Chr', inplace = True, axis = 1)
+
+                if n_jobs is not None:
+                    model_par = model(**pd, n_jobs = n_jobs)
+                else:
+                    model_par = model(**pd)
+
+                model_par.fit(X_train, y_train)
+
+                prediction = model_par.predict(X_test)
+
+                metric = self.score(y_test, prediction)
+
+                score_fit.append(metric)
+            param_grid.append(pd.values())
+            score_param.append(score_fit)
+        print('Done!')
+        print('*'*30)
+
+        means = [np.mean(scores) for scores in score_param]
+        stds = [np.std(scores) for scores in score_param]
+
+        best_mean = np.argmax(means)
+        best_std = np.argmin(stds)
+
+        best_params_mean = param_grid[best_mean]
+        best_params_stds = param_grid[best_std]
+
+        print(f'Best params for mean score are: {best_params_mean}. Their std is {stds[best_mean]}')
+        print(f'Best params for stds are: {best_params_stds}. Their mean is {means[best_std]}')
+
+        print('*'*30)
+        print('Done selection.')
+
+        return best_params_mean, best_params_stds
+
 
 def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
                  plot_distribution:bool = True, show_summary:bool = True,
@@ -844,4 +925,20 @@ def raw_prep_bootstrap(dataset):
     dataset.drop(['flag', 'index'], axis = 1, inplace = True)
     dataset.drop(['Pos'], inplace = True, axis = 1)
     return dataset
+
+def granges_prep(data):
+    """
+        Function for preparation of data for granges
+        and R annotation
+
+        ****
+        Args: data - dataframe after default pipe
+
+        ******
+        Output: ready for granges dataframe
+    """
+    data_ = data[['Chr', 'Pos']]
+    data_[['Start', 'End']] = pd.Series({'a':data_.Pos, 'b':data_.Pos})
+    data_.drop('Pos', axis = 1, inplace = True)
+    return data_
 
