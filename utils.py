@@ -296,6 +296,9 @@ class Projector:
         if 'Chr' in points.columns:
             points_ = points.drop('Chr', axis=1)
             self.points = points_
+        elif 'Age' in points.columns:
+            points_ = points.drop('Age', axis=1)
+            self.points = points_
         else:
             self.points = points
         self.components = n_components
@@ -318,7 +321,8 @@ class Projector:
 
 class Plotter(Projector):
     def __init__(self, points, type:str = 'PCA',
-                  n_components:int = 2, labeled:bool = False, clust = None, chrs_label:bool = False):
+                  n_components:int = 2, labeled:bool = False, clust = None, 
+                  chrs_label:bool = False, age_label:bool = False):
         """
             Class for projection plotting. Enherits from Projector it's methods and attributes
 
@@ -334,8 +338,9 @@ class Plotter(Projector):
             Example: Plotter(data_cleaned, type = 'PCA', n_components = 2)()
         """
         super(Plotter, self).__init__(points=points, type=type, n_components=n_components)
-        points = points.reset_index()
+        points = points.set_index(np.arange(len(points)))
         self.chrs_label = chrs_label
+        self.age_label = age_label
         if labeled:
             self.positive = points[points.R_sign == 1].index
             self.neg = points[points.R_sign == 0].index
@@ -348,6 +353,12 @@ class Plotter(Projector):
                 chrs = points.Chr.unique()
                 for chr in chrs:
                     self.chr_dict[chr] = points.loc[points.Chr == chr].index
+        if age_label:
+            points = points.T.reset_index()
+            ages = points.Age.unique()
+            self.age_dict = {}
+            for age in ages:
+                self.age_dict[age] = points.loc[points.Age == age].index
 
         self.clust = clust
         self.projection = self.project
@@ -369,6 +380,10 @@ class Plotter(Projector):
                 colors = cmap(np.linspace(0, 1.0, len(self.clust.keys())))
                 for clust, color in zip(self.clust.keys(), colors):
                     plt.scatter(z_2d[self.clust[clust]][:,0], z_2d[self.clust[clust]][:,1], label = f'{clust}', color=color)
+            elif self.age_label:
+                colors = cmap(np.linspace(0, 1.0, len(self.age_dict.keys())))
+                for age, color in zip(self.age_dict.keys(), colors):
+                    plt.scatter(z_2d[self.age_dict[age]][:,0], z_2d[self.age_dict[age]][:,1], label = f'{age}', color=color)
             else:
                 plt.scatter(z_2d[:, 0], z_2d[:, 1])
         else:
@@ -409,6 +424,14 @@ class Plotter(Projector):
                     z = z_2d[self.clust[clust]][:, 2]
 
                     ax.scatter(x, y, z, label = f'{clust}', color=color)
+            elif self.age_label:
+                colors = cmap(np.linspace(0, 1.0, len(self.age_dict.keys())))
+                for age, color in zip(self.age_dict.keys(), colors):
+                    x = z_2d[self.age_dict[age]][:, 0]
+                    y = z_2d[self.age_dict[age]][:, 1]
+                    z = z_2d[self.age_dict[age]][:, 2]
+
+                    ax.scatter(x, y, z, label = f'{age}', color = color)
             else:
                 x = z_2d[:, 0]
                 y = z_2d[:, 1]
@@ -461,7 +484,7 @@ class Cluster(Projector):
         """
         super(Cluster, self).__init__(points=points, type=type, n_components=n_components)
         self.type_cluster = cluster
-        points = points.reset_index()
+        points = points.set_index(np.arange(len(points)))
         if use_proj:
             self.proj = self.project
         else:
