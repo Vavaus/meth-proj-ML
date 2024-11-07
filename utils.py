@@ -18,6 +18,8 @@ from sklearn.inspection import permutation_importance
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import r2_score, f1_score, mean_absolute_error
 
+import umap
+
 from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
@@ -291,7 +293,11 @@ class Projector:
         """
             Mixin class for projection obtaining
         """
-        self.points = points
+        if 'Chr' in points.columns:
+            points_ = points.drop('Chr', axis=1)
+            self.points = points_
+        else:
+            self.points = points
         self.components = n_components
         self.type = type
     
@@ -301,14 +307,18 @@ class Projector:
             projector = TSNE(n_components = self.components)
         elif self.type == 'PCA':
             projector = PCA(n_components = self.components, svd_solver = 'randomized')
+        elif self.type == 'UMAP':
+            projector = umap.UMAP(n_components=self.components).fit(self.points.values)
+            projector = projector.transform(self.points.values)
+            return projector
         else:
             projector = TruncatedSVD(n_components = self.components)
-        projection = projector.fit_transform(self.points)
+        projection = projector.fit_transform(self.points.values)
         return projection
 
 class Plotter(Projector):
     def __init__(self, points, type:str = 'PCA',
-                  n_components:int = 2, labeled:bool = False, clust = None):
+                  n_components:int = 2, labeled:bool = False, clust = None, chrs_label:bool = False):
         """
             Class for projection plotting. Enherits from Projector it's methods and attributes
 
@@ -324,13 +334,22 @@ class Plotter(Projector):
             Example: Plotter(data_cleaned, type = 'PCA', n_components = 2)()
         """
         super(Plotter, self).__init__(points=points, type=type, n_components=n_components)
+        points = points.reset_index()
+        self.chrs_label = chrs_label
         if labeled:
-            if not clust:
-                self.positive = points[points.R_sign == 1].index
-                self.neg = points[points.R_sign == 0].index
+            self.positive = points[points.R_sign == 1].index
+            self.neg = points[points.R_sign == 0].index
+            points.drop(['R_sign'], axis = 1, inplace = True)
+        if chrs_label:
+            if 'Chr' not in points.columns:
+                raise ValueError('\'Chr\' column should be in the dataset')
             else:
-                self.positive = clust['Cluster 0']
-                self.neg = clust['Cluster 1']
+                self.chr_dict = {}
+                chrs = points.Chr.unique()
+                for chr in chrs:
+                    self.chr_dict[chr] = points.loc[points.Chr == chr].index
+
+        self.clust = clust
         self.projection = self.project
         self.labeled = labeled
     
@@ -339,12 +358,22 @@ class Plotter(Projector):
         z_2d = self.projection
 
         plt.figure(figsize=(12, 10))
+        cmap = plt.get_cmap('jet')
 
         if not self.labeled:
-            plt.scatter(z_2d[:, 0], z_2d[:, 1])
+            if self.chrs_label:
+                colors = cmap(np.linspace(0, 1.0, len(self.chr_dict.keys())))
+                for chr, color in zip(self.chr_dict.keys(), colors):
+                    plt.scatter(z_2d[self.chr_dict[chr]][:,0], z_2d[self.chr_dict[chr]][:,1], label = f'{chr}', color=color)
+            elif self.clust is not None:
+                colors = cmap(np.linspace(0, 1.0, len(self.clust.keys())))
+                for clust, color in zip(self.clust.keys(), colors):
+                    plt.scatter(z_2d[self.clust[clust]][:,0], z_2d[self.clust[clust]][:,1], label = f'{clust}', color=color)
+            else:
+                plt.scatter(z_2d[:, 0], z_2d[:, 1])
         else:
-            plt.scatter(z_2d[self.positive][:,0], z_2d[self.positive][:,1], label = 'Cluster 0')
-            plt.scatter(z_2d[self.neg][:,0], z_2d[self.neg][:,1], label = 'Cluster 1')
+            plt.scatter(z_2d[self.positive][:,0], z_2d[self.positive][:,1], label = 'Positive sign of R')
+            plt.scatter(z_2d[self.neg][:,0], z_2d[self.neg][:,1], label = 'Negative sign of R')
 
         plt.xlabel('Axis 1')
         plt.ylabel('Axis 2')
@@ -353,17 +382,39 @@ class Plotter(Projector):
 
         plt.grid('True')
 
-        plt.legend()
+        plt.legend(loc='upper right')
 
         plt.show()
     
     @property
     def plot_3d(self):
         z_2d = self.projection
+        fig = plt.figure(figsize = (10,10))
+        ax = fig.add_subplot(111, projection='3d')
+        cmap = plt.get_cmap('jet')
         if not self.labeled:
-            x = z_2d[:, 0]
-            y = z_2d[:, 1]
-            z = z_2d[:, 2]
+            if self.chrs_label:
+                colors = cmap(np.linspace(0, 1.0, len(self.chr_dict.keys())))
+                for chr, color in zip(self.chr_dict.keys(), colors):
+                    x = z_2d[self.chr_dict[chr]][:, 0]
+                    y = z_2d[self.chr_dict[chr]][:, 1]
+                    z = z_2d[self.chr_dict[chr]][:, 2]
+
+                    ax.scatter(x, y, z, label = f'{chr}', color = color)
+            elif self.clust is not None:
+                colors = cmap(np.linspace(0, 1.0, len(self.clust.keys())))
+                for clust, color in zip(self.clust.keys(), colors):
+                    x = z_2d[self.clust[clust]][:, 0]
+                    y = z_2d[self.clust[clust]][:, 1]
+                    z = z_2d[self.clust[clust]][:, 2]
+
+                    ax.scatter(x, y, z, label = f'{clust}', color=color)
+            else:
+                x = z_2d[:, 0]
+                y = z_2d[:, 1]
+                z = z_2d[:, 2]
+
+                ax.scatter(x, y, z)
         else:
             x = z_2d[self.positive][:, 0]
             y = z_2d[self.positive][:, 1]
@@ -372,13 +423,9 @@ class Plotter(Projector):
             x1 = z_2d[self.neg][:, 0]
             y1 = z_2d[self.neg][:, 1]
             z1 = z_2d[self.neg][:, 2]
-            
-        fig = plt.figure(figsize = (10,10))
-        ax = fig.add_subplot(111, projection='3d')
 
-        ax.scatter(x, y, z, label = 'Cluster 0')
-        if self.labeled:
-            ax.scatter(x1, y1, z1, label = 'Cluster 1')
+            ax.scatter(x, y, z, label = 'Positive sign of R')
+            ax.scatter(x1, y1, z1, label = 'Negative sign of R')
 
         ax.set_xlabel('Axis 1')
         ax.set_ylabel('Axis 2')
@@ -414,6 +461,7 @@ class Cluster(Projector):
         """
         super(Cluster, self).__init__(points=points, type=type, n_components=n_components)
         self.type_cluster = cluster
+        points = points.reset_index()
         if use_proj:
             self.proj = self.project
         else:
