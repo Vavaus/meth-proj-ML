@@ -17,6 +17,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import r2_score, f1_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
 
 import umap
 
@@ -517,7 +518,7 @@ class Cluster(Projector):
 
 class MLHandler:
     def __init__(self, X=None, y=None, score = r2_score, test_size:int = 3, 
-                 seed:int = 42):
+                 seed:int = 42, scale:bool = True, numeric_features:list = None):
         """
             Class with ML utils. Doesn't have a unified __call__() method,
             as it is a collection of functions for ML task.
@@ -537,6 +538,11 @@ class MLHandler:
 
         if (X is not None) & (y is not None):
             self.X_train, self.X_test, self.y_train, self.y_test = self.train_test(X=X, y=y, test_size=test_size, seed=seed)
+            if scale:
+                scaler = StandardScaler()
+                self.X_train[numeric_features] = scaler.fit_transform(self.X_train[numeric_features])
+                if test_size != 0:
+                    self.X_test[numeric_features] = scaler.transform(self.X_test[numeric_features])
 
         self.score = score
     
