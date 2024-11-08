@@ -487,8 +487,12 @@ class Cluster(Projector):
         self.type_cluster = cluster
         points = points.set_index(np.arange(len(points)))
         if use_proj:
+            if 'Chr' in points.columns:
+                points = points.drop('Chr', axis = 1)
             self.proj = self.project
         else:
+            if 'Chr' in points.columns:
+                points = points.drop('Chr', axis = 1)
             self.proj = points
         self.num_clusters = num_clusters
         self.clust = self.cluster
