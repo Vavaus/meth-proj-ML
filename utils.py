@@ -19,9 +19,11 @@ from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import r2_score, f1_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler
 
+from typing import Any
+
 import umap
 
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 
 warnings.filterwarnings('ignore')
 
@@ -66,9 +68,13 @@ class PreProcess:
         print('Finished!')
         print('*'*30)
     
-    def select_best_tissue(self, column:str = 'Tissue'):
+    def select_best_tissue(self, column:str = 'Tissue', plot_distrib:bool = True):
         print(f'Looking for {column} with max values...')
         counts = Counter(self.df[column])
+        if plot_distrib:
+            plt.pie(counts.values(), labels=counts.keys())
+            plt.title(f'{column} values distribution.')
+            plt.show()
         keys, vals = list(counts.keys()), list(counts.values())
         best = keys[np.argmax(vals)]
 
@@ -95,9 +101,9 @@ class PreProcess:
 
         return selected
     
-    def __call__(self):
+    def __call__(self, column:str = 'Tissue', plot_distrib:bool = True):
         self.clear_df()
-        res = self.select_best_tissue()
+        res = self.select_best_tissue(column=column, plot_distrib=plot_distrib)
         return res
     
 class StatisticCounter:
@@ -300,6 +306,9 @@ class Projector:
         elif 'Age' in points.columns:
             points_ = points.drop('Age', axis=1)
             self.points = points_
+        elif 'R_sign' in points.columns:
+            points_ = points.drop('R_sign', axis=1)
+            self.points = points_
         else:
             self.points = points
         self.components = n_components
@@ -323,7 +332,8 @@ class Projector:
 class Plotter(Projector):
     def __init__(self, points, type:str = 'PCA',
                   n_components:int = 2, labeled:bool = False, clust = None, 
-                  chrs_label:bool = False, age_label:bool = False):
+                  chrs_label:bool = False, age_label:bool = False, column:str = None,
+                  legend:bool = True, inp:list = None):
         """
             Class for projection plotting. Enherits from Projector it's methods and attributes
 
@@ -339,13 +349,10 @@ class Plotter(Projector):
             Example: Plotter(data_cleaned, type = 'PCA', n_components = 2)()
         """
         super(Plotter, self).__init__(points=points, type=type, n_components=n_components)
+        self.legend = legend
         points = points.set_index(np.arange(len(points)))
         self.chrs_label = chrs_label
         self.age_label = age_label
-        if labeled:
-            self.positive = points[points.R_sign == 1].index
-            self.neg = points[points.R_sign == 0].index
-            points.drop(['R_sign'], axis = 1, inplace = True)
         if chrs_label:
             if 'Chr' not in points.columns:
                 raise ValueError('\'Chr\' column should be in the dataset')
@@ -354,12 +361,22 @@ class Plotter(Projector):
                 chrs = points.Chr.unique()
                 for chr in chrs:
                     self.chr_dict[chr] = points.loc[points.Chr == chr].index
-        if age_label:
+        elif age_label:
             points = points.T.reset_index()
             ages = points.Age.unique()
             self.age_dict = {}
             for age in ages:
                 self.age_dict[age] = points.loc[points.Age == age].index
+
+        elif column is not None:
+            self.col = True
+            unique = points[column].unique()
+            self.dict_val = {}
+            for val in unique:
+                self.dict_val[val] = points.loc[points[column] == val].index
+        if labeled:
+            self.positive = points[points.R_sign == 1].index
+            self.neg = points[points.R_sign == 0].index
 
         self.clust = clust
         self.projection = self.project
@@ -385,6 +402,10 @@ class Plotter(Projector):
                 colors = cmap(np.linspace(0, 1.0, len(self.age_dict.keys())))
                 for age, color in zip(self.age_dict.keys(), colors):
                     plt.scatter(z_2d[self.age_dict[age]][:,0], z_2d[self.age_dict[age]][:,1], label = f'{age}', color=color)
+            elif self.col:
+                colors = cmap(np.linspace(0, 1.0, len(self.dict_val.keys())))
+                for val, color in zip(self.dict_val.keys(), colors):
+                    plt.scatter(z_2d[self.dict_val[val]][:,0], z_2d[self.dict_val[val]][:,1], label = f'{val}', color=color)
             else:
                 plt.scatter(z_2d[:, 0], z_2d[:, 1])
         else:
@@ -398,7 +419,8 @@ class Plotter(Projector):
 
         plt.grid('True')
 
-        plt.legend(loc='upper right')
+        if self.legend:
+            plt.legend(loc='upper right')
 
         plt.show()
     
@@ -433,6 +455,14 @@ class Plotter(Projector):
                     z = z_2d[self.age_dict[age]][:, 2]
 
                     ax.scatter(x, y, z, label = f'{age}', color = color)
+            elif self.col:
+                colors = cmap(np.linspace(0, 1.0, len(self.dict_val.keys())))
+                for val, color in zip(self.dict_val.keys(), colors):
+                    x = z_2d[self.dict_val[val]][:, 0]
+                    y = z_2d[self.dict_val[val]][:, 1]
+                    z = z_2d[self.dict_val[val]][:, 2]
+
+                    ax.scatter(x, y, z, label = f'{val}', color = color)
             else:
                 x = z_2d[:, 0]
                 y = z_2d[:, 1]
@@ -455,7 +485,9 @@ class Plotter(Projector):
         ax.set_ylabel('Axis 2')
         ax.set_zlabel('Axis 3')
         ax.set_title('3D projection')
-        ax.legend()
+
+        if self.legend:
+            ax.legend()
 
         plt.show()
 
@@ -489,10 +521,15 @@ class Cluster(Projector):
         if use_proj:
             if 'Chr' in points.columns:
                 points = points.drop('Chr', axis = 1)
+            elif 'R_sign' in points.columns:
+                points = points.drop('R_sign', axis=1)
             self.proj = self.project
         else:
             if 'Chr' in points.columns:
                 points = points.drop('Chr', axis = 1)
+            elif 'R_sign' in points.columns:
+                points = points.drop('R_sign', axis=1)
+                self.points = points
             self.proj = points
         self.num_clusters = num_clusters
         self.clust = self.cluster
