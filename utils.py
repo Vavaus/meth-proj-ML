@@ -23,7 +23,7 @@ from typing import Any
 
 import umap
 
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
 
@@ -53,7 +53,7 @@ class PreProcess:
         self.impute = impute
         self.imp_method = imp_method
 
-    def clear_df(self):
+    def clear_df(self, threshold: float | Any = None):
         print('*'*30)
         print('Start to clear...')
         if self.impute:
@@ -64,16 +64,25 @@ class PreProcess:
             else:
                 raise ValueError('This method is not supported.')
         else:
-            self.df.dropna(axis = 1, inplace = True)
+            if threshold is not None:
+                self.df.dropna(axis = 1, inplace = True, thresh = int((1-threshold)*self.df.shape[0]))
+            else:
+                self.df.dropna(axis = 1, inplace = True)
         print('Finished!')
         print('*'*30)
     
     def select_best_tissue(self, column:str = 'Tissue', plot_distrib:bool = True):
+
+        def unique(row):
+            nans = row.isna()
+            row = row[~nans]
+            return np.unique(row).shape[0] > 1
+        
         print(f'Looking for {column} with max values...')
         counts = Counter(self.df[column])
         if plot_distrib:
-            plt.pie(counts.values(), labels=counts.keys())
-            plt.title(f'{column} values distribution.')
+            plt.pie(counts.values(), labels=counts.keys(), autopct='%1.1f%%')
+            plt.title(f'{column} values distribution')
             plt.show()
         keys, vals = list(counts.keys()), list(counts.values())
         best = keys[np.argmax(vals)]
@@ -93,7 +102,7 @@ class PreProcess:
         selected = selected.T
 
         print('Clearing absolute constant values...')
-        selected['unique'] = selected.apply(lambda row: np.unique(row).shape[0] > 1, axis = 1)
+        selected['unique'] = selected.apply(lambda row: unique(row), axis = 1)
         selected = selected[selected.unique == 1]
         selected.drop('unique', axis = 1, inplace = True)
         print('Finished!')
@@ -101,8 +110,8 @@ class PreProcess:
 
         return selected
     
-    def __call__(self, column:str = 'Tissue', plot_distrib:bool = True):
-        self.clear_df()
+    def __call__(self, column:str = 'Tissue', plot_distrib:bool = True, threshold: float | Any = None):
+        self.clear_df(threshold=threshold)
         res = self.select_best_tissue(column=column, plot_distrib=plot_distrib)
         return res
     
@@ -134,9 +143,12 @@ class StatisticCounter:
     def calculate_stats(self, row):
         row = row.astype('float32')
 
-        w, b, _, _, _ = linregress(self.x, row)
+        nans = row.isna()
+        row = row[~nans]
 
-        r, _ = self.typ(self.x, row)
+        w, b, _, _, _ = linregress(self.x[~nans], row)
+
+        r, _ = self.typ(self.x[~nans], row)
         
         result = pd.Series({'w': w, 'R': r, 'b': b})
         return result
@@ -985,7 +997,7 @@ class MLHandler:
 def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
                  plot_distribution:bool = True, show_summary:bool = True,
                  features:list = ['CG', 'TG'], window:int = 10000,
-                 imp_method:str = 'mean'):
+                 imp_method:str = 'mean', threshold: float | Any = None):
     """
         Default pipe for data processing.
 
@@ -998,7 +1010,8 @@ def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
               plot_distribution - whether to plot correlations distribution,
               show_summary - prints statistics of correlation distribution,
               features - list of features to count in a sequence (default ['CG', 'TG']),
-              window - size of window to cut sequence
+              window - size of window to cut sequence,
+              threshold - threshold for NaN in df
         
         ******
         Output: processed dataframe.
@@ -1013,7 +1026,7 @@ def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
         Cluster and Plotter are not tested, such as cross_val and grid_search_cv functions.
         If you'll find some errors, please tell me.
     """
-    res1 = PreProcess(dataframe=dataset, imp_method=imp_method, impute=impute)()
+    res1 = PreProcess(dataframe=dataset, imp_method=imp_method, impute=impute)(threshold=threshold)
     res2 = StatisticCounter(processed_data=res1, typ=typ)(plot_distribution=plot_distribution, 
                                                           show_summary=show_summary)
     res3 = SeqParser(dataframe=res2, seq=path)(features=features, window=window)
