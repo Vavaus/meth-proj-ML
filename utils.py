@@ -7,6 +7,7 @@ from collections import Counter
 import pickle
 import warnings
 import random
+import re
 
 from scipy.stats import linregress, pearsonr, kendalltau, spearmanr, describe
 
@@ -18,6 +19,8 @@ from sklearn.inspection import permutation_importance
 from sklearn.model_selection import ParameterGrid
 from sklearn.metrics import r2_score, f1_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler
+
+from statsmodels.tsa.ar_model import AutoReg
 
 from typing import Any
 
@@ -82,7 +85,7 @@ class PreProcess:
         counts = Counter(self.df[column])
         if plot_distrib:
             plt.pie(counts.values(), labels=counts.keys(), autopct='%1.1f%%')
-            plt.title(f'{column} values distribution')
+            plt.title(f'% of age variability by tissue.')
             plt.show()
         keys, vals = list(counts.keys()), list(counts.values())
         best = keys[np.argmax(vals)]
@@ -94,15 +97,17 @@ class PreProcess:
         selected.drop([column, 'Sex', 'Strain', 'ID'], inplace = True, axis = 1)
 
         print('Sorting age and setting it as index...')
+        selected['Age'] = selected['Age'].astype('category')
         selected = selected.sort_values(by = 'Age')
-        selected.set_index('Age', inplace = True)
+        selected.set_index('Age', inplace=True)
 
         print('Transposing...')
         selected = selected.astype('float32')
         selected = selected.T
 
         print('Clearing absolute constant values...')
-        selected['unique'] = selected.apply(lambda row: unique(row), axis = 1)
+        #selected['unique'] = selected.apply(lambda row: unique(row), axis = 1, raw=True, engine='numba')
+        selected['unique'] = selected.apply(unique, axis = 1)
         selected = selected[selected.unique == 1]
         selected.drop('unique', axis = 1, inplace = True)
         print('Finished!')
@@ -144,14 +149,13 @@ class StatisticCounter:
         row = row.astype('float32')
 
         nans = row.isna()
-        row = row[~nans]
+        row_ = row[~nans]
 
-        w, b, _, _, _ = linregress(self.x[~nans], row)
+        w, b, _, _, _ = linregress(self.x[~nans], row_)
 
-        r, _ = self.typ(self.x[~nans], row)
+        r, _ = self.typ(self.x[~nans], row_)
         
-        result = pd.Series({'w': w, 'R': r, 'b': b})
-        return result
+        return pd.Series({'w': w, 'R': r, 'b': b})
 
     def calculate_fit(self, row):
         fit = row.w*self.x + row.b
@@ -161,7 +165,7 @@ class StatisticCounter:
         print('*'*30)
         print('Calculating statistics...')
 
-        self.df[['w', 'R', 'b']] = self.df.apply(lambda row: self.calculate_stats(row), axis = 1)
+        self.df[['w', r'$\beta$ ~ Age', 'b']] = self.df.apply(lambda row: self.calculate_stats(row), axis = 1)
 
         print('Calculating LR...')
         self.df['lr'] = self.df.apply(lambda row: self.calculate_fit(row), axis = 1)
@@ -172,11 +176,11 @@ class StatisticCounter:
     def calculate_resid(self):
         self.calculation()
         print('Calculating residuals...')
-        self.df['resid'] = self.df.apply(lambda row: row.iloc[:len(self.x)].values - row.lr, axis = 1)
+        self.df['resid'] = self.df.apply(lambda row: row.iloc[:len(self.x)][~row.iloc[:len(self.x)].isna()].values - row.lr[~row.iloc[:len(self.x)].isna()], axis = 1)
         self.df['resid'] = np.abs(self.df.resid.values)
 
         print('Calculating correlation of residuals absolute values...')
-        self.df['corr_resid'] = self.df.apply(lambda row: self.typ(self.x, row.resid.astype('float32'))[0], axis = 1)
+        self.df[r'$|\delta \beta|$ ~ Age'] = self.df.apply(lambda row: self.typ(self.x[~row.iloc[:len(self.x)].isna()], row.resid.astype('float32'))[0], axis = 1)
 
         print('Finished!')
         print('*'*30)
@@ -207,13 +211,13 @@ class StatisticCounter:
 
         print('Cleaning the dataframe...')
         self.df.drop(['resid', 'lr', 'b'], axis = 1, inplace = True)
-        self.df['R_sign'] = np.where(self.df.R >= 0, 1, 0)
+        self.df['R_sign'] = np.where(self.df[r'$\beta$ ~ Age'] >= 0, 1, 0)
         print('Finished!')
         print('*'*30)
 
         if show_summary:
-            self.describe_dist(self.df, 'R')
-            self.describe_dist(self.df, 'corr_resid')
+            self.describe_dist(self.df, r'$\beta$ ~ Age')
+            self.describe_dist(self.df, r'$|\delta \beta|$ ~ Age')
 
         if plot_distribution:
             count = Counter(self.df.R_sign)
@@ -223,7 +227,7 @@ class StatisticCounter:
             plt.title('Sign of correlation distribution')
             plt.show()
 
-            df_plot = self.df[['R', 'corr_resid']]
+            df_plot = self.df[[r'$\beta$ ~ Age', r'$|\delta \beta|$ ~ Age']]
             plt.figure(figsize=(12,8))
             sns.pairplot(df_plot)
             plt.show()
@@ -269,7 +273,7 @@ class SeqParser:
         self.df['Pos'] = np.uint32(self.df.Pos.values)
         self.df['Start'] = self.df.Pos - window
         self.df['End'] = self.df.Pos + window
-        df = self.df[['Chr', 'Pos', 'Start', 'End', 'R', 'corr_resid', 'R_sign']]
+        df = self.df[['Chr', 'Pos', 'Start', 'End', r'$\beta$ ~ Age', r'$|\delta \beta|$ ~ Age', 'R_sign']]
         return df
 
     def cut_seq(self, df):
@@ -649,13 +653,13 @@ class MLHandler:
                 plt.plot(np.linspace(-1,1,100), np.linspace(-1,1,100), ls = '--', c = 'r')
                 plt.text(-1, 1, f'$R2\ test = {np.round(score,2)}$', fontsize = 12, c = 'r')
                 plt.text(-1, 0.85, f'$MAE\ test = {np.round(mae_test,2)}$', fontsize = 12, c = 'g')
-                plt.title(f'True vs. Pred. Model: {model}')
+                plt.title(f'True vs. Predicted. Model: {model}')
                 plt.xlabel('True')
-                plt.ylabel('Pred')
+                plt.ylabel('Predicted')
                 plt.grid()
                 plt.show()
             
-            score_dict = {'train':score_train, 'test':score, 'diff': np.abs(score_train - score)}
+            score_dict = {'train':score_train, 'test':score}
             scores[f'{model}'] = score_dict
         print('*'*30)
         print('Done!')
@@ -664,7 +668,7 @@ class MLHandler:
         sc = sc.T.reset_index()
         sc.plot(x = 'index', kind = 'bar', stacked=False, 
          rot=30, grid=True, fontsize=6, 
-         title='Result of testing', ylabel='Score', xlabel='Model')
+         title='Result of models testing', ylabel=r'$R^2$ score', xlabel='Model')
         plt.show()
         return scores
 
@@ -679,9 +683,12 @@ class MLHandler:
         X_train = X.loc[~X.Chr.isin(test)].copy()
         X_test = X.loc[X.Chr.isin(test)].copy()
 
-        y_train = y.loc[y.index.isin(X_train.index)].copy()
-        y_test = y.loc[y.index.isin(X_test.index)].copy()
-
+        if y is not None:
+            y_train = y.loc[y.index.isin(X_train.index)].copy()
+            y_test = y.loc[y.index.isin(X_test.index)].copy()
+        else:
+            y_train, y_test = 0, 0
+            
         return X_train, X_test, y_train, y_test
     
 
@@ -789,6 +796,13 @@ class MLHandler:
         random_keys = [random.random() for _ in data]
         data_shuffled = [x for _, x in sorted(zip(random_keys, data))]
         return data_shuffled
+
+    @staticmethod
+    def extract_suffix_number(s):
+        match = re.search(r'(\d+)$', s)
+        if match:
+            return int(match.group(1))
+        return float('inf')
     
     def cross_val(self, model, cv:int = 5, one_by_one:bool = False):
         """
@@ -803,7 +817,10 @@ class MLHandler:
             Output: cross-val score, plots
         """
         chrs = self.X_train.Chr.unique()
-        vals = self.return_shuffled(list(chrs))
+        if not one_by_one:
+            vals = self.return_shuffled(list(chrs))
+        else:
+            vals = sorted(list(chrs), key=self.extract_suffix_number)
         if one_by_one:
             cross = [[val] for val in vals]
         else:
@@ -837,13 +854,13 @@ class MLHandler:
         if not one_by_one:
             sns.boxplot(score)
             plt.title('Cross val score')
-            plt.ylabel(f'{self.score}')
+            plt.ylabel(r'$R^2 score$')
         else:
             score = pd.DataFrame(score, index=range(len(chrs)))
             plt.figure(figsize=(14,10))
             sns.barplot(score)
-            plt.title(f'Chromosomes {self.score}')
-            plt.ylabel(f'{self.score}')
+            plt.title(r'$R^2$ score for each chromosome')
+            plt.ylabel(r'$R^2$ score')
         
         return score
     
@@ -994,7 +1011,7 @@ class MLHandler:
         return best_params_mean, best_params_stds
 
 
-def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
+def default_pipe(dataset: str, path:str, impute:bool = False, typ = pearsonr,
                  plot_distribution:bool = True, show_summary:bool = True,
                  features:list = ['CG', 'TG'], window:int = 10000,
                  imp_method:str = 'mean', threshold: float | Any = None):
@@ -1026,7 +1043,8 @@ def default_pipe(dataset, path:str, impute:bool = False, typ = pearsonr,
         Cluster and Plotter are not tested, such as cross_val and grid_search_cv functions.
         If you'll find some errors, please tell me.
     """
-    res1 = PreProcess(dataframe=dataset, imp_method=imp_method, impute=impute)(threshold=threshold)
+    dataset_ = pd.read_pickle(dataset)
+    res1 = PreProcess(dataframe=dataset_, imp_method=imp_method, impute=impute)(threshold=threshold)
     res2 = StatisticCounter(processed_data=res1, typ=typ)(plot_distribution=plot_distribution, 
                                                           show_summary=show_summary)
     res3 = SeqParser(dataframe=res2, seq=path)(features=features, window=window)
@@ -1072,4 +1090,35 @@ def granges_prep(data):
     data_[['Start', 'End']] = pd.Series({'a':data_.Pos, 'b':data_.Pos})
     data_.drop('Pos', axis = 1, inplace = True)
     return data_
+
+def count_ar_vectorized(df, upper_lag: int = 20):
+    start_array = df['Start'].values
+    vals = df['Pos'].values
+    lag_results = []
+
+    for val in tqdm(vals):
+        mask = (df['Pos'] >= start_array) & (df['Pos'] <= val)
+        cpgs = df.loc[mask, 'R'].values
+
+        num_obs = len(cpgs)
+
+        max_lag = min(upper_lag, num_obs - 1) 
+        
+        if num_obs < 2:
+            lag_results.append(np.nan)  
+            continue  
+
+        aic_values = []
+        for lag in range(1, max_lag + 1):
+            try:
+                model = AutoReg(cpgs, lags=lag, trend='n').fit()
+                aic_values.append(model.aic)
+            except (ZeroDivisionError, ValueError) as e: 
+                aic_values.append(np.inf)  
+            
+        min_aic_index = np.argmin(aic_values)
+        lag_results.append(min_aic_index)
+
+    df['Lag'] = lag_results
+    return df
 
