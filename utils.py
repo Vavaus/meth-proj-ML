@@ -142,11 +142,11 @@ class StatisticCounter:
             data_with_corrs = StatisticCounter(cleaned_data, pearsonr)(plot_distribution=False, show_summary = False)
         """
         self.df = processed_data
-        self.x = self.df.columns.get_level_values('Age').astype('float32')
+        self.x = self.df.columns.get_level_values('Age').astype(np.float32)
         self.typ = typ
 
     def calculate_stats(self, row):
-        row = row.astype('float32')
+        row = row.astype(np.float32)
 
         nans = row.isna()
         row_ = row[~nans]
@@ -207,11 +207,14 @@ class StatisticCounter:
               ''')
     
     def __call__(self, plot_distribution:bool = True, show_summary:bool = True):
+        methyl_vals = self.df.apply(lambda row: np.mean(row.astype(np.float32)), axis=1)
+        self.df['meth_mean'] = methyl_vals
         self.calculate_resid()
 
         print('Cleaning the dataframe...')
         self.df.drop(['resid', 'lr', 'b'], axis = 1, inplace = True)
         self.df['R_sign'] = np.where(self.df[r'$\beta$ ~ Age'] >= 0, 1, 0)
+        self.df[r'$\hat \beta$'] = methyl_vals
         print('Finished!')
         print('*'*30)
 
@@ -265,7 +268,7 @@ class SeqParser:
         chr, pos = row['index'].split('_')[0], row['index'].split('_')[1]
         return pd.Series({'Chr': chr, 'Pos': pos})
     
-    def chr_maker(self, window:int = 10000):
+    def chr_maker(self, window:int = 1024):
         self.df[['Chr', 'Pos']] = self.df.apply(lambda row: self.parse_chr(row), axis = 1)
         self.df['flag'] = self.df.Pos.str.match(r'[A-z]')
         self.df = self.df[self.df.flag == 0]
@@ -277,7 +280,7 @@ class SeqParser:
         return df
 
     def cut_seq(self, df):
-        df['Seq'] = df.apply(lambda row: self.seq[row.Chr][row.Start:row.End].upper(), axis = 1)
+        df['Seq'] = df.apply(lambda row: self.seq[row.Chr][row.Start:row.End], axis = 1)
         return df
 
     @staticmethod
@@ -289,10 +292,14 @@ class SeqParser:
     
     def count_feature(self, df, features:list):
         for feat in features:
-            df[feat] = df.apply(lambda row: row.Seq.count(feat), axis = 1)
+            df[feat] = df.apply(lambda row: row.Seq.upper().count(feat), axis = 1)
         return df
     
-    def __call__(self, features:list = ['CG', 'TG'], window:int = 10000):
+    def count_lowercase_letters(self, df, window):
+        df['LowConf'] = df.apply(lambda row: sum(1 for char in filter(str.islower, row.Seq))/(2*window), axis=1)
+        return df
+    
+    def __call__(self, features:list = ['CG', 'TG'], window:int = 1024):
         print('*'*30)
         print('Defining cuts\' bounds...')
         df = self.chr_maker(window=window)
@@ -304,6 +311,8 @@ class SeqParser:
         df['count_cpg'] = counts
         print('Obtainig cuts\' sequence...')
         df = self.cut_seq(df)
+        print('Counting low-confidence regions...')
+        df = self.count_lowercase_letters(df=df, window=window)
         print(f'Counting features: {features}...')
         df = self.count_feature(df=df, features=features)
         df.drop(['Seq'], axis = 1, inplace = True)
@@ -627,25 +636,25 @@ class MLHandler:
         """
         scores = {}
         if 'Chr' in self.X_train.columns:
-            self.X_train.drop('Chr', axis = 1, inplace = True)
+            X_train = self.X_train.drop('Chr', axis = 1)
         if 'Chr' in self.X_test.columns:
-            self.X_test.drop('Chr', axis = 1, inplace = True)
+            X_test = self.X_test.drop('Chr', axis = 1)
         for model in models:
             print('*'*30)
             print(f'Trying model {model}...')
             print('Fit...')
-            model.fit(self.X_train, self.y_train)
+            model.fit(X_train, self.y_train)
 
             print('Predict...')
-            prediction = model.predict(self.X_test)
-            prediction_train = model.predict(self.X_train)
+            prediction = model.predict(X_test)
+            prediction_train = model.predict(X_train)
 
             if regression:
                 score = r2_score(self.y_test, prediction)
                 score_train = r2_score(self.y_train, prediction_train)
             else:
                 score = f1_score(self.y_test, prediction)
-                score_train = f1_score(self.y_test, prediction_train)
+                score_train = f1_score(self.y_train, prediction_train)
             
             if (len(models) == 1)&(regression):
                 mae_test = mean_absolute_error(self.y_test, prediction)
@@ -666,9 +675,13 @@ class MLHandler:
         print('Plotting results...')
         sc = pd.DataFrame(scores)
         sc = sc.T.reset_index()
+        if regression:
+            title = r'$R^2$ score'
+        else:
+            title = r'$F1$ score'
         sc.plot(x = 'index', kind = 'bar', stacked=False, 
          rot=30, grid=True, fontsize=6, 
-         title='Result of models testing', ylabel=r'$R^2$ score', xlabel='Model')
+         title='Result of models testing', ylabel=title, xlabel='Model')
         plt.show()
         return scores
 
@@ -692,7 +705,7 @@ class MLHandler:
         return X_train, X_test, y_train, y_test
     
 
-    def permutation_importance(self, model):
+    def permutation_importance(self, model, random_state:int = 42):
         """
             Perform permutation importance for a specific model.
 
@@ -702,9 +715,9 @@ class MLHandler:
             Output: sklearn permutation importance object
         """
         if 'Chr' in self.X_test.columns:
-            self.X_test.drop('Chr', axis = 1, inplace = True)
+            X_test = self.X_test.drop('Chr', axis = 1)
 
-        r = permutation_importance(model, self.X_test, self.y_test,
+        r = permutation_importance(model, X_test, self.y_test,
                            n_repeats=30,
                            random_state=0)
 
@@ -804,7 +817,27 @@ class MLHandler:
             return int(match.group(1))
         return float('inf')
     
-    def cross_val(self, model, cv:int = 5, one_by_one:bool = False):
+    def create_weights(self, X_train, y_train, bin_type:str = 'Rice'):
+        n = X_train.shape[0]
+        if bin_type == 'Rice':
+            bin_num = int(2 * (n**(1/3)))
+        elif bin_type == 'sqrt':
+            bin_num = int(np.sqrt(n))
+        elif bin_type == 'auto':
+            bin_num = 'auto'
+        
+        hist, edges = np.histogram(y_train, bins=bin_num)
+
+        weights = np.zeros_like(y_train)
+
+        for idx in range(len(edges) - 1):
+            weights[np.where((y_train >= edges[idx]) & (y_train < edges[idx + 1]))[0]] = hist[idx] if hist[idx] > 0 else 1
+
+        weights = weights[:,0]
+
+        return 1 / weights
+    
+    def cross_val(self, model, cv:int = 5, one_by_one:bool = False, bin_type:str = None):
         """
             Perform KFold cross-validation.
 
@@ -839,7 +872,11 @@ class MLHandler:
             X_train.drop('Chr', inplace = True, axis = 1)
             X_test.drop('Chr', inplace = True, axis = 1)
 
-            model.fit(X_train, y_train)
+            if bin_type is not None:
+                weights = self.create_weights(X_train=X_train, y_train=y_train, bin_type=bin_type)
+                model.fit(X_train, y_train, sample_weight=weights)
+            else:
+                model.fit(X_train, y_train)
 
             prediction = model.predict(X_test)
 
@@ -851,20 +888,24 @@ class MLHandler:
                 score[set[0]] = metric
         print('Done!')
         print('*'*30)
+        if self.score == f1_score:
+            title = r'$F1$ score'
+        else:
+            title = r'$R^2$ score'
         if not one_by_one:
             sns.boxplot(score)
             plt.title('Cross val score')
-            plt.ylabel(r'$R^2 score$')
+            plt.ylabel(title)
         else:
             score = pd.DataFrame(score, index=range(len(chrs)))
             plt.figure(figsize=(14,10))
             sns.barplot(score)
             plt.title(r'$R^2$ score for each chromosome')
-            plt.ylabel(r'$R^2$ score')
+            plt.ylabel(title)
         
         return score
     
-    def grid_search_cv(self, model, params:dict, cv:int = 5, n_jobs = None):
+    def grid_search_cv(self, model, params:dict, cv:int = 5, n_jobs = None, bin_type:str = None):
         """
             Perform grid search over parameters.
 
@@ -909,7 +950,11 @@ class MLHandler:
                 else:
                     model_par = model(**param)
 
-                model_par.fit(X_train, y_train)
+                if bin_type is not None:
+                    weights = self.create_weights(X_train=X_train, y_train=y_train)
+                    model_par.fit(X_train, y_train, sample_weight=weights)
+                else:
+                    model_par.fit(X_train, y_train)
 
                 prediction = model_par.predict(X_test)
 
@@ -937,7 +982,8 @@ class MLHandler:
 
         return best_params_mean, best_params_stds
     
-    def randomized_search_cv(self, model, param_dist:dict, n_iters:int = 50, cv:int = 5, n_jobs = None):
+    def randomized_search_cv(self, model, param_dist:dict, n_iters:int = 50, cv:int = 5, n_jobs = None,
+                             bin_type:str = None):
         """
             Perform randomized search cv over sampled from a distribution parameters
 
@@ -977,11 +1023,15 @@ class MLHandler:
                 X_test.drop('Chr', inplace = True, axis = 1)
 
                 if n_jobs is not None:
-                    model_par = model(**pd, n_jobs = n_jobs)
+                    model_par = model(**pd, n_jobs = n_jobs, sample_weight=weights)
                 else:
-                    model_par = model(**pd)
+                    model_par = model(**pd, sample_weight=weights)
 
-                model_par.fit(X_train, y_train)
+                if bin_type is not None:
+                    weights = self.create_weights(X_train=X_train, y_train=y_train)
+                    model_par.fit(X_train, y_train, sample_weight=weights)
+                else:
+                    model_par.fit(X_train, y_train)
 
                 prediction = model_par.predict(X_test)
 
